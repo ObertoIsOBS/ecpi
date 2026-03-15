@@ -21,12 +21,15 @@ if _SCRIPT_DIR not in sys.path:
 from ecpi_lib.managers import (
     detect_managers,
     get_search_results,
+    get_installed_results,
+    get_installed_names_for_fuzzy,
     install_package,
+    uninstall_package,
     git_clone_result,
     list_installers_for_display,
 )
-from ecpi_lib.present import explain_and_confirm, paginated_search_only
-from ecpi_lib.post_install import offer_post_install_actions
+from ecpi_lib.present import explain_and_confirm, explain_and_confirm_uninstall, paginated_search_only
+from ecpi_lib.post_install import offer_post_install_actions, remove_desktop_shortcuts_for_package, offer_remove_leftover_files
 
 
 def main():
@@ -60,7 +63,20 @@ def main():
         action="store_true",
         help="List available package installers for the current environment and whether each is active for $SHELL (e.g. fisher only when using fish)",
     )
+    parser.add_argument(
+        "-U", "--uninstall",
+        action="store_true",
+        help="Uninstall a package: search installed packages, choose one, then remove desktop shortcuts and optionally leftover user files",
+    )
+    parser.add_argument(
+        "--verbose-install",
+        action="store_true",
+        dest="verbose_install",
+        help="Use extra verbose output during install (pacman -v, yum -v). Helps when output goes quiet during long installs. Can also set ECPI_VERBOSE=1.",
+    )
     args = parser.parse_args()
+    if os.environ.get("ECPI_VERBOSE", "").strip() in ("1", "yes", "true"):
+        args.verbose_install = True
 
     if args.show_installers:
         show_installers()
@@ -75,6 +91,10 @@ def main():
     if not managers:
         print("ecpi: No supported package manager found (pacman, paru, yay, yum, fisher).")
         sys.exit(1)
+
+    if args.uninstall:
+        run_uninstall(managers, query, args)
+        return
 
     results = get_search_results(managers, query)
 
@@ -105,13 +125,47 @@ def main():
         print("Cancelled.")
         sys.exit(0)
 
-    ok = install_package(managers, choice)
+    ok = install_package(managers, choice, verbose_install=args.verbose_install)
     if ok:
         offer_post_install_actions(
             choice["manager"],
             choice["name"],
             skip_confirm=args.yes,
         )
+    sys.exit(0 if ok else 1)
+
+
+def run_uninstall(managers: list, query: str, args) -> None:
+    """Uninstall flow: search installed packages, confirm, remove shortcuts, uninstall, offer leftover cleanup."""
+    results = get_installed_results(managers, query)
+
+    if not results and not args.no_fuzzy:
+        installed_tuples = get_installed_names_for_fuzzy(managers)
+        if installed_tuples:
+            names = [t[0] for t in installed_tuples]
+            name_to_result = {t[0]: t[1] for t in installed_tuples}
+            matches = get_close_matches(query.lower(), names, n=10, cutoff=0.4)
+            if matches:
+                print(f"No exact match for '{query}'. Similar installed packages:")
+                results = [name_to_result[n] for n in matches]
+
+    if not results:
+        print(f"No installed packages found matching '{query}'.")
+        if not args.no_fuzzy:
+            print("Tip: Try a different search term or use --no-fuzzy to disable similar-package suggestions.")
+        sys.exit(1)
+
+    choice = explain_and_confirm_uninstall(results, query, skip_confirm=args.yes)
+    if choice is None:
+        print("Cancelled.")
+        sys.exit(0)
+
+    # Remove desktop shortcuts while package is still installed (so we can list its files)
+    remove_desktop_shortcuts_for_package(choice["manager"], choice["name"])
+
+    ok = uninstall_package(managers, choice)
+    if ok:
+        offer_remove_leftover_files(choice["name"], skip_confirm=args.yes)
     sys.exit(0 if ok else 1)
 
 

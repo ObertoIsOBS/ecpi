@@ -2,6 +2,8 @@
 
 A small Arch Linux helper that picks the right package manager for you, searches across **pacman**, **paru**, **yay**, **yum**, **fisher**, and **git clone**, suggests similar packages when there’s no exact match, and asks for confirmation before running any install.
 
+**Repository:** [https://github.com/ObertoIsOBS/ecpi](https://github.com/ObertoIsOBS/ecpi)
+
 ## Features
 
 - **Auto-detect** package managers: uses whatever is installed (pacman, paru, yay, yum, fisher, git).
@@ -21,30 +23,54 @@ A small Arch Linux helper that picks the right package manager for you, searches
 
 ## Installation
 
-Run from the project directory, or link into `/usr/local/bin`:
+### Install via Git clone
+
+Clone the repository and run `ecpi` from the clone directory, or install it system-wide:
 
 ```bash
-# Run in place
+# Clone the repo
+git clone https://github.com/ObertoIsOBS/ecpi.git
+cd ecpi
+
+# Option A: Run in place (no install)
 ./ecpi <package>
 
-# Link into /usr/local/bin (installs a wrapper so ecpi finds ecpi_lib)
-./link-ecpi.sh   # uses sudo
+# Option B: Install system-wide (sudo) — keeps repo in place, adds ecpi to PATH
+./link-ecpi.sh
+# Then run from anywhere: ecpi <package>
 
-# Or copy manually (e.g. ~/.local/bin)
+# Option C: Copy into your user PATH (no sudo)
+mkdir -p ~/.local/bin
 cp ecpi ~/.local/bin/ && cp -r ecpi_lib ~/.local/bin/
+# Ensure ~/.local/bin is in your PATH, then run: ecpi <package>
+```
+
+**Note:** With Option B, the cloned directory must stay where it is; `link-ecpi.sh` installs a wrapper that runs `ecpi` from that directory. With Option C, `ecpi` and `ecpi_lib` must remain together in the same directory (e.g. `~/.local/bin`).
+
+Quick try without installing (run from a temporary clone):
+
+```bash
+git clone https://github.com/ObertoIsOBS/ecpi.git /tmp/ecpi && /tmp/ecpi/ecpi --help
 ```
 
 ## Usage
 
 ```bash
 ecpi <package|search term>   # Search and then optionally install
+ecpi -U, --uninstall <pkg>   # Uninstall: search installed packages, remove shortcuts, offer leftover cleanup
 ecpi --show-installers       # List available installers for current $SHELL
 ecpi --search-only <term>    # Only search, do not install
 ecpi -y <package>             # Install without confirmation (use with care)
+ecpi -y -U <package>          # Uninstall without confirmation prompts
+ecpi --verbose-install       # Extra verbose install (pacman -v, yum -v); helps when output goes quiet
 ecpi --no-fuzzy <term>       # Disable similar-package suggestions
 ```
 
+**Long installs:** If the installer produces no output for a while but is still running, ecpi prints `[ecpi] Installer still running (no output lately). Please be patient…` and repeats periodically. Use `--verbose-install` or `ECPI_VERBOSE=1` to get more output from pacman/yum and reduce quiet periods.
+
 After a successful install, ecpi may prompt to add CLI binaries to your shell PATH (if the install path isn’t already in PATH) or to add a desktop shortcut for GUI applications.
+
+**Uninstall (`ecpi -U <package>`):** Searches installed packages (pacman/paru/yay/yum/fisher), lets you choose if there are multiple matches, then runs the manager's uninstall command (with verbose output and optional sudo retry). It then removes any desktop shortcut that was added for the package and prompts to remove leftover user files (e.g. `~/.config/<pkg>`, `~/.local/share/<pkg>`). If no exact match is found, similar installed packages are suggested.
 
 ### Examples
 
@@ -54,6 +80,7 @@ ecpi neovim           # Same with neovim
 ecpi --search-only vim   # List all vim-related packages, no install
 ecpi jorgebucaran/fisher  # If not a package, offer git clone
 ecpi -y firefox       # Install firefox without prompting
+ecpi -U firefox       # Uninstall firefox, remove shortcut, optionally remove leftover config
 ```
 
 ## How it works

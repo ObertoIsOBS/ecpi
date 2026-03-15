@@ -1,5 +1,6 @@
 """
 Post-install actions: add CLI to PATH, add GUI to desktop.
+Post-uninstall: remove desktop shortcuts, offer to remove leftover user files.
 """
 
 import os
@@ -188,3 +189,86 @@ def offer_post_install_actions(
                     print(f"  Shortcut added to {desktop_dir}.")
                 else:
                     print("  Failed to copy shortcut.")
+
+
+def remove_desktop_shortcuts_for_package(manager_name: str, pkg_name: str) -> int:
+    """
+    Find desktop shortcuts that were added for this package (by name) and remove them.
+    Returns the number of shortcuts removed.
+    """
+    if manager_name not in ("pacman", "paru", "yay"):
+        return 0
+    files = get_installed_files(manager_name, pkg_name)
+    desktop_files = get_desktop_files(files)
+    if not desktop_files:
+        return 0
+    home = os.path.expanduser("~")
+    desktop_dir = os.environ.get("XDG_DESKTOP_DIR", os.path.join(home, "Desktop"))
+    if not os.path.isabs(desktop_dir):
+        desktop_dir = os.path.join(home, desktop_dir)
+    removed = 0
+    for sys_desktop in desktop_files:
+        basename = os.path.basename(sys_desktop)
+        shortcut = os.path.join(desktop_dir, basename)
+        if os.path.isfile(shortcut):
+            try:
+                os.remove(shortcut)
+                print(f"  Removed desktop shortcut: {shortcut}")
+                removed += 1
+            except OSError as e:
+                print(f"  Could not remove {shortcut}: {e}")
+    return removed
+
+
+def _leftover_candidates(pkg_name: str) -> list[tuple[str, str]]:
+    """Return list of (path, label) for common leftover config/data dirs for a package."""
+    home = os.path.expanduser("~")
+    # Normalize: firefox-esr -> firefox-esr, firefox_esr; try both
+    base = pkg_name.replace("_", "-")
+    base_underscore = pkg_name.replace("-", "_")
+    candidates = []
+    for name in (base, base_underscore, pkg_name):
+        if not name:
+            continue
+        for sub, label in (
+            (".config/" + name, "config"),
+            (".local/share/" + name, "data"),
+            (".cache/" + name, "cache"),
+            ("." + name, "dotdir"),
+        ):
+            path = os.path.join(home, sub)
+            if os.path.exists(path) and path not in [p[0] for p in candidates]:
+                candidates.append((path, label))
+    return candidates
+
+
+def offer_remove_leftover_files(pkg_name: str, skip_confirm: bool = False) -> None:
+    """
+    List common leftover user dirs for the package and prompt to remove them.
+    """
+    candidates = _leftover_candidates(pkg_name)
+    if not candidates:
+        return
+    print("\nLeftover user files for this package may exist:")
+    for path, label in candidates:
+        print(f"  {path} ({label})")
+    if skip_confirm:
+        return
+    try:
+        ans = input("Remove these leftover files/directories? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans not in ("y", "yes"):
+        return
+    for path, _ in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path)
+                print(f"  Removed: {path}")
+            else:
+                os.remove(path)
+                print(f"  Removed: {path}")
+        except OSError as e:
+            print(f"  Could not remove {path}: {e}")

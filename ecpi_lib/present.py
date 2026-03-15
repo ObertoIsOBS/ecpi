@@ -29,6 +29,28 @@ def _print_page(results: list[dict], query: str, page: int, page_size: int) -> N
         print()
 
 
+def _print_page_uninstall(results: list[dict], query: str, page: int, page_size: int) -> None:
+    """Print a single page of uninstall results (installed packages)."""
+    total = len(results)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = min(start + page_size, total)
+    page_results = results[start:end]
+    print(f"\nInstalled packages matching '{query}' (page {page}/{total_pages}, {total} total):\n")
+    for i, r in enumerate(page_results, start=start + 1):
+        src = r.get("source", r.get("repo", ""))
+        desc = (r.get("description") or "")[:70]
+        if len((r.get("description") or "")) > 70:
+            desc += "..."
+        print(f"  {i}. [{r['manager']}] {r['name']}")
+        if src:
+            print(f"      Where installed: {src}")
+        if desc:
+            print(f"      {desc}")
+        print()
+
+
 def print_search_results(results: list[dict], query: str) -> None:
     """Print first page of results (for compatibility)."""
     _print_page(results, query, 1, PAGE_SIZE)
@@ -134,6 +156,89 @@ def explain_and_confirm(
     try:
         ans = input("Proceed with install? [Y/n] ").strip().lower()
         if ans and ans != "y" and ans != "yes":
+            return None
+        return r
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
+def paginated_select_uninstall(
+    results: list[dict],
+    query: str,
+    page_size: int = PAGE_SIZE,
+) -> Optional[dict]:
+    """
+    Show installed packages 10 per page; user selects by index or n/p/q.
+    Returns the chosen result dict or None.
+    """
+    total = len(results)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = 1
+    while True:
+        _print_page_uninstall(results, query, page, page_size)
+        prompt = "Select # to uninstall, [n]ext [p]rev [q]uit: "
+        try:
+            raw = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not raw:
+            continue
+        if raw == "q":
+            return None
+        if raw == "n":
+            if page < total_pages:
+                page += 1
+            continue
+        if raw == "p":
+            if page > 1:
+                page -= 1
+            continue
+        try:
+            n = int(raw)
+            if 1 <= n <= total:
+                return results[n - 1]
+        except ValueError:
+            pass
+
+
+def explain_and_confirm_uninstall(
+    results: list[dict],
+    query: str,
+    skip_confirm: bool = False,
+    page_size: int = PAGE_SIZE,
+) -> Optional[dict]:
+    """
+    Explain which installed package will be uninstalled (or let user choose), then confirm.
+    Returns the chosen result dict or None if cancelled.
+    """
+    if not results:
+        return None
+    if len(results) == 1:
+        r = results[0]
+        print(f"One installed package found: {r['name']} (via {r['manager']}).")
+        print(f"  Where installed: {r.get('source', r.get('repo', 'N/A'))}")
+        print(f"  {r.get('description', '')}")
+        print(f"  Uninstall command: {r['bin']} ... {r['name']}")
+        if skip_confirm:
+            return r
+        try:
+            ans = input("Uninstall this package? [y/N] ").strip().lower()
+            if ans not in ("y", "yes"):
+                return None
+            return r
+        except (EOFError, KeyboardInterrupt):
+            return None
+    r = paginated_select_uninstall(results, query, page_size=page_size)
+    if r is None:
+        return None
+    print(f"Selected: {r['name']} (via {r['manager']})")
+    print(f"  Where installed: {r.get('source', r.get('repo', 'N/A'))}")
+    print(f"  Command: {r['bin']} ... {r['name']}")
+    if skip_confirm:
+        return r
+    try:
+        ans = input("Proceed with uninstall? [y/N] ").strip().lower()
+        if ans not in ("y", "yes"):
             return None
         return r
     except (EOFError, KeyboardInterrupt):
