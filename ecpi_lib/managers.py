@@ -427,8 +427,15 @@ def get_installed_names_for_fuzzy(managers: list[dict]) -> list[tuple[str, dict]
     return results
 
 
-def get_search_results(managers: list[dict], query: str) -> list[dict]:
-    """Search all managers for query and return unified list of matches."""
+def get_search_results(
+    managers: list[dict],
+    query: str,
+    search_by_description: bool = False,
+) -> list[dict]:
+    """Search all managers for query and return unified list of matches.
+    If search_by_description is True, AUR (paru/yay) uses --searchby name-desc for
+    description-aware search, and results are sorted to prioritize description matches.
+    """
     all_results = []
     for m in managers:
         name, bin_path = m["name"], m["bin"]
@@ -444,7 +451,10 @@ def get_search_results(managers: list[dict], query: str) -> list[dict]:
             })
             continue
         if name in ("pacman", "paru", "yay"):
-            cmd = [bin_path] + m["search_cmd"] + [query]
+            cmd = [bin_path] + list(m["search_cmd"])
+            if search_by_description and name in ("paru", "yay"):
+                cmd.extend(["--searchby", "name-desc"])
+            cmd.append(query)
             try:
                 out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if out.returncode == 0 and out.stdout:
@@ -471,24 +481,38 @@ def get_search_results(managers: list[dict], query: str) -> list[dict]:
         seen.add(key)
         ordered.append(r)
 
-    # Sort so exact matches from ANY manager come first, then partial matches.
-    # Tier 0: exact name match (cursor == cursor)
-    # Tier 1: name starts with query (cursor-bin, cursor-theme)
-    # Tier 2: query in name (xcursor, breeze-cursors)
-    # Tier 3: other (query only in description)
-    # Within same tier, prefer pacman then paru then yay then yum then fisher.
+    # Sort: when search_by_description, prioritize description matches (broad/function search).
+    # Otherwise: exact name, name prefix, query in name, then description-only.
     manager_order = {"pacman": 0, "paru": 1, "yay": 2, "yum": 3, "fisher": 4}
 
     def sort_key(x: dict) -> tuple:
         name_lower = x["name"].lower()
-        if name_lower == query_lower:
-            tier = 0
-        elif name_lower.startswith(query_lower + "-") or name_lower.startswith(query_lower + "_"):
-            tier = 1
-        elif query_lower in name_lower:
-            tier = 2
+        desc = (x.get("description") or "").lower()
+        desc_match = query_lower in desc
+        name_exact = name_lower == query_lower
+        name_prefix = name_lower.startswith(query_lower + "-") or name_lower.startswith(query_lower + "_")
+        name_contains = query_lower in name_lower
+        if search_by_description:
+            # Broad search: description match first, then name match
+            if desc_match and name_exact:
+                tier = 0
+            elif desc_match:
+                tier = 1
+            elif name_exact:
+                tier = 2
+            elif name_prefix or name_contains:
+                tier = 3
+            else:
+                tier = 4
         else:
-            tier = 3
+            if name_exact:
+                tier = 0
+            elif name_prefix:
+                tier = 1
+            elif name_contains:
+                tier = 2
+            else:
+                tier = 3
         return (tier, manager_order.get(x["manager"], 99), name_lower)
 
     ordered.sort(key=sort_key)

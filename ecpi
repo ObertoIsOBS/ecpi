@@ -74,6 +74,12 @@ def main():
         dest="verbose_install",
         help="Use extra verbose output during install (pacman -v, yum -v). Helps when output goes quiet during long installs. Can also set ECPI_VERBOSE=1.",
     )
+    parser.add_argument(
+        "-D", "--by-description",
+        action="store_true",
+        dest="by_description",
+        help="Search by package function/description (broad search). Prioritizes description matches and, for AUR, uses description-aware search. Works with --search-only too.",
+    )
     args = parser.parse_args()
     if os.environ.get("ECPI_VERBOSE", "").strip() in ("1", "yes", "true"):
         args.verbose_install = True
@@ -96,7 +102,7 @@ def main():
         run_uninstall(managers, query, args)
         return
 
-    results = get_search_results(managers, query)
+    results = get_search_results(managers, query, search_by_description=args.by_description)
 
     # If no results, try fuzzy suggestions from repo list (pacman/paru/yay)
     if not results and not args.no_fuzzy:

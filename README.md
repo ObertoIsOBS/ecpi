@@ -63,8 +63,11 @@ ecpi --search-only <term>    # Only search, do not install
 ecpi -y <package>             # Install without confirmation (use with care)
 ecpi -y -U <package>          # Uninstall without confirmation prompts
 ecpi --verbose-install       # Extra verbose install (pacman -v, yum -v); helps when output goes quiet
+ecpi -D, --by-description    # Search by function/description (broad search); works with --search-only
 ecpi --no-fuzzy <term>       # Disable similar-package suggestions
 ```
+
+**Search by description (`-D` / `--by-description`):** Broad search by what packages do, not just by name. Prioritizes matches in package descriptions and, for AUR (paru/yay), uses description-aware search. Use e.g. `ecpi -D --search-only "terminal emulator"` or `ecpi -D "text editor"` to find by function.
 
 **Long installs:** If the installer produces no output for a while but is still running, ecpi prints `[ecpi] Installer still running (no output lately). Please be patient…` and repeats periodically. Use `--verbose-install` or `ECPI_VERBOSE=1` to get more output from pacman/yum and reduce quiet periods.
 
