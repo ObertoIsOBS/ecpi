@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""
+ecpi - Easy Cross-Package Installer for Arch Linux
+
+Identifies available package managers (pacman, paru, yay, yum, fisher, git),
+searches for packages across them, offers fuzzy matches, explains results,
+and asks for confirmation before installing.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from difflib import get_close_matches
+
+# Ensure project root is on path when run as ./ecpi
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from ecpi_lib.managers import (
+    detect_managers,
+    get_search_results,
+    install_package,
+    git_clone_result,
+)
+from ecpi_lib.present import explain_and_confirm, paginated_search_only
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="ecpi",
+        description="Install packages using the best available package manager (pacman, paru, yay, yum, fisher, or git).",
+    )
+    parser.add_argument(
+        "query",
+        nargs="+",
+        help="Package name(s) or search term(s) to install",
+    )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation and install immediately (use with care)",
+    )
+    parser.add_argument(
+        "--search-only",
+        action="store_true",
+        help="Only search and show results; do not install",
+    )
+    parser.add_argument(
+        "--no-fuzzy",
+        action="store_true",
+        help="Do not suggest similar package names when no exact match",
+    )
+    args = parser.parse_args()
+    query = " ".join(args.query).strip()
+    if not query:
+        parser.error("Please provide a package name or search term.")
+
+    managers = detect_managers()
+    if not managers:
+        print("ecpi: No supported package manager found (pacman, paru, yay, yum, fisher).")
+        sys.exit(1)
+
+    results = get_search_results(managers, query)
+
+    # If no results, try fuzzy suggestions from repo list (pacman/paru/yay)
+    if not results and not args.no_fuzzy:
+        fuzzy = try_fuzzy_suggestions(managers, query)
+        if fuzzy:
+            print(f"No exact match for '{query}'. Did you mean one of these?")
+            results = fuzzy
+
+    # If still no results, offer git clone when query looks like a repo URL or owner/repo
+    if not results and git_clone_result(query):
+        results = [git_clone_result(query)]
+        print(f"No package found for '{query}'. You can clone it as a git repository:")
+
+    if not results:
+        print(f"No packages found for '{query}'.")
+        if not args.no_fuzzy:
+            print("Tip: Try a different search term or use --search-only to see raw search output.")
+        sys.exit(1)
+
+    if args.search_only:
+        paginated_search_only(results, query)
+        return
+
+    choice = explain_and_confirm(results, query, skip_confirm=args.yes)
+    if choice is None:
+        print("Cancelled.")
+        sys.exit(0)
+
+    ok = install_package(managers, choice)
+    sys.exit(0 if ok else 1)
+
+
+def try_fuzzy_suggestions(managers: list, query: str) -> list:
+    """If no search results, get package list and suggest close matches."""
+    for m in managers:
+        if m.get("name") not in ("pacman", "paru", "yay"):
+            continue
+        # Get all package names for fuzzy match (only when no exact results)
+        try:
+            cmd = [m["bin"]] + m.get("list_all_cmd", [])
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if out.returncode != 0 or not out.stdout:
+                continue
+            names = [n.strip() for n in out.stdout.splitlines() if n.strip()]
+            matches = get_close_matches(query.lower(), names, n=10, cutoff=0.4)
+            if not matches:
+                continue
+            # Dedupe (pacman -Slq can list same name from multiple repos)
+            seen = set()
+            unique = [p for p in matches if p not in seen and not seen.add(p)]
+            return [
+                {
+                    "manager": m["name"],
+                    "bin": m["bin"],
+                    "name": pkg,
+                    "source": "fuzzy suggestion",
+                    "description": "Possible match (no exact search hit)",
+                }
+                for pkg in unique
+            ]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return []
+
+
+if __name__ == "__main__":
+    main()
