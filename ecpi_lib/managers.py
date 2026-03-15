@@ -2,8 +2,11 @@
 Detect available package managers and perform search/install.
 """
 
+import os
 import subprocess
 import shutil
+import sys
+import threading
 from typing import Any, Optional
 
 
@@ -81,29 +84,65 @@ MANAGER_CONFIG = [
     {
         "name": "fisher",
         "bin": "fisher",
-        "search_cmd": [],  # fisher doesn't have a standard search; we treat name as plugin identifier
+        "search_cmd": [],
         "install_cmd": ["add"],
         "list_all_cmd": [],
         "sources": ["fish plugin registry"],
+        "shell": "fish",  # only relevant when $SHELL is fish
     },
 ]
 
 
-def detect_managers() -> list[dict[str, Any]]:
-    """Return list of available package managers (path and config)."""
+def detect_managers(include_shell_specific: bool = True) -> list[dict[str, Any]]:
+    """Return list of available package managers (path and config).
+    When include_shell_specific is True, shell-specific managers (e.g. fisher)
+    are only included if they match the current $SHELL.
+    """
+    shell = os.environ.get("SHELL", "").lower()
     found = []
     for cfg in MANAGER_CONFIG:
         path = shutil.which(cfg["bin"])
-        if path:
-            found.append({
-                "name": cfg["name"],
-                "bin": path if path else cfg["bin"],
-                "search_cmd": cfg["search_cmd"],
-                "install_cmd": cfg["install_cmd"],
-                "list_all_cmd": cfg.get("list_all_cmd", []),
-                "sources": cfg.get("sources", []),
-            })
+        if not path:
+            continue
+        req_shell = cfg.get("shell")  # e.g. "fish" for fisher
+        if req_shell and include_shell_specific and req_shell not in shell:
+            continue  # skip fisher when not in fish shell
+        active_for_shell = bool(req_shell and req_shell in shell)
+        found.append({
+            "name": cfg["name"],
+            "bin": path,
+            "search_cmd": cfg["search_cmd"],
+            "install_cmd": cfg["install_cmd"],
+            "list_all_cmd": cfg.get("list_all_cmd", []),
+            "sources": cfg.get("sources", []),
+            "active_for_shell": active_for_shell,
+            "shell": req_shell,
+        })
     return found
+
+
+def list_installers_for_display(include_all: bool = True) -> list[dict[str, Any]]:
+    """List all detected installers (including those not active for current shell).
+    Used for --show-installers. When include_all is True, runs detection twice:
+    once with shell filter (normal) and once without to show "available but not for this shell".
+    """
+    # Get managers that are "in path" (ignore shell filter to show everything)
+    shell = os.environ.get("SHELL", "").lower()
+    result = []
+    for cfg in MANAGER_CONFIG:
+        path = shutil.which(cfg["bin"])
+        if not path:
+            continue
+        req_shell = cfg.get("shell")
+        active = bool(req_shell and req_shell in shell)
+        result.append({
+            "name": cfg["name"],
+            "bin": path,
+            "sources": cfg.get("sources", []),
+            "active_for_shell": active,
+            "shell": req_shell,
+        })
+    return result
 
 
 def _parse_pacman_like(stdout: str, manager_name: str, bin_path: str) -> list[dict]:
@@ -217,7 +256,7 @@ def get_search_results(managers: list[dict], query: str) -> list[dict]:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 pass
 
-    # Prefer exact name matches and dedupe by (manager, name)
+    # Dedupe by (manager, name)
     seen = set()
     ordered = []
     query_lower = query.lower()
@@ -227,29 +266,136 @@ def get_search_results(managers: list[dict], query: str) -> list[dict]:
             continue
         seen.add(key)
         ordered.append(r)
-    # Sort: exact match first, then by manager preference (pacman > paru > yay > yum > fisher)
-    order = {"pacman": 0, "paru": 1, "yay": 2, "yum": 3, "fisher": 4}
-    ordered.sort(key=lambda x: (x["name"].lower() != query_lower, order.get(x["manager"], 99)))
+
+    # Sort so exact matches from ANY manager come first, then partial matches.
+    # Tier 0: exact name match (cursor == cursor)
+    # Tier 1: name starts with query (cursor-bin, cursor-theme)
+    # Tier 2: query in name (xcursor, breeze-cursors)
+    # Tier 3: other (query only in description)
+    # Within same tier, prefer pacman then paru then yay then yum then fisher.
+    manager_order = {"pacman": 0, "paru": 1, "yay": 2, "yum": 3, "fisher": 4}
+
+    def sort_key(x: dict) -> tuple:
+        name_lower = x["name"].lower()
+        if name_lower == query_lower:
+            tier = 0
+        elif name_lower.startswith(query_lower + "-") or name_lower.startswith(query_lower + "_"):
+            tier = 1
+        elif query_lower in name_lower:
+            tier = 2
+        else:
+            tier = 3
+        return (tier, manager_order.get(x["manager"], 99), name_lower)
+
+    ordered.sort(key=sort_key)
     return ordered
 
 
+def _looks_like_permission_error(stderr: str, stdout: str) -> bool:
+    """True if combined output suggests a root/permission denied error."""
+    text = (stderr + "\n" + stdout).lower()
+    keywords = (
+        "root",
+        "permission denied",
+        "access denied",
+        "no permission",
+        "not permitted",
+        "operation not permitted",
+        "eacces",
+        "eperm",
+        "cannot create",
+        "failed to create",
+        "unable to create",
+        "must be run as root",
+        "run as root",
+        "requires root",
+        "need root",
+        "privileges",
+    )
+    return any(k in text for k in keywords)
+
+
+def _stream_output(pipe, stream, buffer: list, is_stderr: bool):
+    """Read from pipe, write to stream, append to buffer. Runs in thread."""
+    try:
+        for line in iter(pipe.readline, ""):
+            if line:
+                stream.write(line)
+                stream.flush()
+                buffer.append(line)
+    finally:
+        pipe.close()
+
+
+def _run_install_cmd(cmd: list, use_sudo: bool, stream: bool = True) -> tuple[int, str]:
+    """Run install command, optionally with sudo.
+    When stream is True, stdout/stderr are shown in real time; output is still
+    buffered for permission-error detection. Returns (returncode, combined_output).
+    """
+    run_cmd = ["sudo", "--"] + cmd if use_sudo else cmd
+    if not stream:
+        result = subprocess.run(run_cmd, capture_output=True, text=True)
+        out = (result.stdout or "") + "\n" + (result.stderr or "")
+        return (result.returncode, out)
+    buffer: list[str] = []
+    proc = subprocess.Popen(
+        run_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    t1 = threading.Thread(target=_stream_output, args=(proc.stdout, sys.stdout, buffer, False))
+    t2 = threading.Thread(target=_stream_output, args=(proc.stderr, sys.stderr, buffer, True))
+    t1.daemon = True
+    t2.daemon = True
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    proc.wait()
+    return (proc.returncode, "".join(buffer))
+
+
 def install_package(managers: list[dict], choice: dict) -> bool:
-    """Run the install command for the chosen result."""
+    """Run the install command for the chosen result.
+    pacman is run with sudo; AUR helpers (paru, yay) run as user and prompt as needed.
+    On permission-style errors, prompts to retry with sudo.
+    """
     manager_name = choice["manager"]
     bin_path = choice["bin"]
     pkg_name = choice["name"]
     if manager_name == "git":
         cmd = [bin_path, "clone", pkg_name]
         print(f"Running: {' '.join(cmd)}")
-        return subprocess.run(cmd).returncode == 0
+        returncode, output = _run_install_cmd(cmd, use_sudo=False)
+        if returncode != 0 and _looks_like_permission_error(output, ""):
+            try:
+                ans = input("Retry with sudo? [y/N] ").strip().lower()
+                if ans in ("y", "yes"):
+                    print(f"Running: sudo -- {' '.join(cmd)}")
+                    returncode, _ = _run_install_cmd(cmd, use_sudo=True)
+            except (EOFError, KeyboardInterrupt):
+                pass
+        return returncode == 0
     m = next((x for x in managers if x["name"] == manager_name), None)
     if not m:
         print(f"Unknown manager: {manager_name}")
         return False
     if manager_name == "fisher":
         cmd = [bin_path, "add", pkg_name]
+        use_sudo = False
     else:
         cmd = [bin_path] + m["install_cmd"] + [pkg_name]
-    print(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd)
-    return result.returncode == 0
+        use_sudo = manager_name == "pacman"
+    print(f"Running: {' '.join(['sudo', '--'] + cmd if use_sudo else cmd)}")
+    returncode, output = _run_install_cmd(cmd, use_sudo=use_sudo)
+    if returncode != 0 and _looks_like_permission_error(output, "") and not use_sudo:
+        try:
+            ans = input("Retry with sudo? [y/N] ").strip().lower()
+            if ans in ("y", "yes"):
+                print(f"Running: sudo -- {' '.join(cmd)}")
+                returncode, _ = _run_install_cmd(cmd, use_sudo=True)
+        except (EOFError, KeyboardInterrupt):
+            pass
+    return returncode == 0

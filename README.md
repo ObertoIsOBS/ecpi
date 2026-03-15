@@ -11,6 +11,8 @@ A small Arch Linux helper that picks the right package manager for you, searches
 - **Confirmation**: explains what will be installed and asks before running the install command.
 - **Pagination**: search results show 10 at a time; use **n** (next), **p** (prev), **q** (quit). When installing, type the result number to select.
 - **Git fallback**: if the query looks like a repo (URL or `owner/repo`) and no package is found, offers to clone with `git clone`.
+- **Environment-aware installers**: shell-specific managers (e.g. **fisher** for Fish) are only offered when they match your `$SHELL`. Use `--show-installers` to see what’s available for the current environment.
+- **Post-install**: after installing via pacman/paru/yay, ecpi can add CLI binaries to your shell PATH (if not already there) and offer to add a desktop shortcut for GUI apps.
 
 ## Requirements
 
@@ -36,10 +38,13 @@ cp ecpi ~/.local/bin/ && cp -r ecpi_lib ~/.local/bin/
 
 ```bash
 ecpi <package|search term>   # Search and then optionally install
+ecpi --show-installers       # List available installers for current $SHELL
 ecpi --search-only <term>    # Only search, do not install
 ecpi -y <package>             # Install without confirmation (use with care)
 ecpi --no-fuzzy <term>       # Disable similar-package suggestions
 ```
+
+After a successful install, ecpi may prompt to add CLI binaries to your shell PATH (if the install path isn’t already in PATH) or to add a desktop shortcut for GUI applications.
 
 ### Examples
 

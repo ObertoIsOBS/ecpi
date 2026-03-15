@@ -23,39 +23,53 @@ from ecpi_lib.managers import (
     get_search_results,
     install_package,
     git_clone_result,
+    list_installers_for_display,
 )
 from ecpi_lib.present import explain_and_confirm, paginated_search_only
+from ecpi_lib.post_install import offer_post_install_actions
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="ecpi",
-        description="Install packages using the best available package manager (pacman, paru, yay, yum, fisher, or git).",
+        description="Install packages using the best available package manager (pacman, paru, yay, yum, fisher, or git). Searches across managers, suggests similar packages if no exact match, and asks for confirmation before installing.",
+        epilog="With no arguments, this help is shown. Use --show-installers to list detected installers for the current $SHELL.",
     )
     parser.add_argument(
         "query",
-        nargs="+",
-        help="Package name(s) or search term(s) to install",
+        nargs="*",
+        help="Package name(s) or search term(s) to search for and optionally install",
     )
     parser.add_argument(
         "-y", "--yes",
         action="store_true",
-        help="Skip confirmation and install immediately (use with care)",
+        help="Skip all confirmation prompts; install immediately and skip post-install PATH/desktop prompts",
     )
     parser.add_argument(
         "--search-only",
         action="store_true",
-        help="Only search and show results; do not install",
+        help="Only search and display results (paginated); do not prompt to install",
     )
     parser.add_argument(
         "--no-fuzzy",
         action="store_true",
-        help="Do not suggest similar package names when no exact match",
+        help="Do not suggest similar package names when there is no exact match",
+    )
+    parser.add_argument(
+        "--show-installers",
+        action="store_true",
+        help="List available package installers for the current environment and whether each is active for $SHELL (e.g. fisher only when using fish)",
     )
     args = parser.parse_args()
+
+    if args.show_installers:
+        show_installers()
+        return
+
     query = " ".join(args.query).strip()
     if not query:
-        parser.error("Please provide a package name or search term.")
+        parser.print_help()
+        sys.exit(0)
 
     managers = detect_managers()
     if not managers:
@@ -92,7 +106,34 @@ def main():
         sys.exit(0)
 
     ok = install_package(managers, choice)
+    if ok:
+        offer_post_install_actions(
+            choice["manager"],
+            choice["name"],
+            skip_confirm=args.yes,
+        )
     sys.exit(0 if ok else 1)
+
+
+def show_installers() -> None:
+    """Print detected package managers and which are active for current shell."""
+    installers = list_installers_for_display()
+    shell = os.environ.get("SHELL", "unknown")
+    print(f"Current shell: {shell}\n")
+    print("Available package installers:\n")
+    for m in installers:
+        sources = ", ".join(m.get("sources", []))
+        if m.get("active_for_shell"):
+            tag = " (active for this shell)"
+        elif m.get("shell"):
+            tag = f" (use when SHELL is {m['shell']})"
+        else:
+            tag = " (system-wide)"
+        print(f"  {m['name']}: {m['bin']}")
+        print(f"    Sources: {sources}{tag}")
+        print()
+    if not installers:
+        print("  No supported installers found.")
 
 
 def try_fuzzy_suggestions(managers: list, query: str) -> list:
