@@ -630,7 +630,12 @@ def _build_install_cmd(manager: dict, pkg_name: str, verbose_install: bool) -> l
     return [bin_path] + list(base_cmd) + [pkg_name]
 
 
-def install_package(managers: list[dict], choice: dict, verbose_install: bool = False) -> bool:
+def install_package(
+    managers: list[dict],
+    choice: dict,
+    verbose_install: bool = False,
+    pin_versions: bool = False,
+) -> bool:
     """Run the install command for the chosen result.
     pacman is run with sudo; AUR helpers (paru, yay) run as user and prompt as needed.
     On permission-style errors, prompts to retry with sudo.
@@ -639,6 +644,7 @@ def install_package(managers: list[dict], choice: dict, verbose_install: bool = 
     manager_name = choice["manager"]
     bin_path = choice["bin"]
     pkg_name = choice["name"]
+    pkg_version = choice.get("version", "") or ""
     if manager_name == "git":
         cmd = [bin_path, "clone", pkg_name]
         print(f"Running: {' '.join(cmd)}")
@@ -660,7 +666,19 @@ def install_package(managers: list[dict], choice: dict, verbose_install: bool = 
         cmd = [bin_path, "add", pkg_name]
         use_sudo = False
     else:
-        cmd = _build_install_cmd(m, pkg_name, verbose_install)
+        pkg_arg = pkg_name
+        if pin_versions and pkg_version:
+            if manager_name == "pacman":
+                # pacman accepts explicit version as: pkgname=version
+                pkg_arg = f"{pkg_name}={pkg_version}"
+            elif manager_name == "yum":
+                # best-effort: attempt name-version (yum may require NEVRA)
+                pkg_arg = f"{pkg_name}-{pkg_version}"
+            else:
+                # For AUR helpers/fisher, exported versions are not reliably installable via CLI.
+                print("[ecpi] Note: --pin-versions requested, but versions are ignored for this installer.")
+
+        cmd = _build_install_cmd(m, pkg_arg, verbose_install)
         use_sudo = manager_name == "pacman"
     if verbose_install and manager_name in ("pacman", "yum"):
         print("[ecpi] Verbose install enabled (more output during long installs).")

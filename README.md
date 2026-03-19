@@ -58,6 +58,10 @@ git clone https://github.com/ObertoIsOBS/ecpi.git /tmp/ecpi && /tmp/ecpi/ecpi --
 ```bash
 ecpi <package|search term>   # Search and then optionally install
 ecpi -U, --uninstall <pkg>   # Uninstall: search installed packages, remove shortcuts, offer leftover cleanup
+ecpi --export <FILE>        # Export installed packages manifest
+ecpi --import <FILE>       # Import manifest and install packages (from `--export`)
+ecpi --pin-versions        # When importing, try installing pacman/yum entries with exported versions
+ecpi --skip-existing       # When importing, skip packages already installed (faster)
 ecpi --show-installers       # List available installers for current $SHELL
 ecpi --search-only <term>    # Only search, do not install
 ecpi -y <package>             # Install without confirmation (use with care)
@@ -70,6 +74,23 @@ ecpi --no-fuzzy <term>       # Disable similar-package suggestions
 **Search by description (`-D` / `--by-description`):** Broad search by what packages do, not just by name. Prioritizes matches in package descriptions and, for AUR (paru/yay), uses description-aware search. Use e.g. `ecpi -D --search-only "terminal emulator"` or `ecpi -D "text editor"` to find by function.
 
 **Long installs:** If the installer produces no output for a while but is still running, ecpi prints `[ecpi] Installer still running (no output lately). Please be patient…` and repeats periodically. Use `--verbose-install` or `ECPI_VERBOSE=1` to get more output from pacman/yum and reduce quiet periods.
+
+**Export (`ecpi --export <FILE>`):** Writes a manifest of *installed* packages in an ecpi-specific format (pacman vs foreign/AUR vs yum vs fisher). It is meant to be human-readable like `requirements.txt`, but with manager metadata so you can import/install with `ecpi --import`.
+
+**Import (`ecpi --import <FILE>`):** Reads the manifest and installs packages with the best available installer:
+`pacman` entries use `pacman`, `aur` entries use `paru` (or `yay` if `paru` isn’t available), `yum` entries use `yum`, and `fisher` entries use `fisher` (when available for your shell). If a needed manager is missing, those entries are skipped.
+
+Use `--pin-versions` to try to install pacman/yum entries using the exported versions (best-effort). Versions for AUR/fisher are ignored.
+
+`--skip-existing` (alias `--skip`) will skip packages that are already installed, regardless of the exported version, to speed up imports of large manifests.
+
+Example:
+
+```bash
+ecpi --export ~/my-ecpi.packages
+# copy ~/my-ecpi.packages to the other machine
+ecpi -y --import ~/my-ecpi.packages
+```
 
 After a successful install, ecpi may prompt to add CLI binaries to your shell PATH (if the install path isn’t already in PATH) or to add a desktop shortcut for GUI applications.
 

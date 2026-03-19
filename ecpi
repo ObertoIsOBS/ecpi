@@ -30,6 +30,7 @@ from ecpi_lib.managers import (
 )
 from ecpi_lib.present import explain_and_confirm, explain_and_confirm_uninstall, paginated_search_only
 from ecpi_lib.post_install import offer_post_install_actions, remove_desktop_shortcuts_for_package, offer_remove_leftover_files
+from ecpi_lib.export_import import export_installed_packages, parse_export_manifest
 
 
 def main():
@@ -69,6 +70,12 @@ def main():
         help="Uninstall a package: search installed packages, choose one, then remove desktop shortcuts and optionally leftover user files",
     )
     parser.add_argument(
+        "--export",
+        dest="export_path",
+        metavar="FILE",
+        help="Export installed packages to FILE (ecpi manifest). Use --import to install from the manifest.",
+    )
+    parser.add_argument(
         "--verbose-install",
         action="store_true",
         dest="verbose_install",
@@ -80,6 +87,25 @@ def main():
         dest="by_description",
         help="Search by package function/description (broad search). Prioritizes description matches and, for AUR, uses description-aware search. Works with --search-only too.",
     )
+    parser.add_argument(
+        "--import",
+        dest="import_path",
+        metavar="FILE",
+        help="Import a manifest created by `ecpi --export FILE` and install its packages",
+    )
+    parser.add_argument(
+        "--pin-versions",
+        action="store_true",
+        dest="pin_versions",
+        help="When importing manifests, try to install pacman/yum entries using the exported versions (best-effort). Versions for AUR/fisher are ignored.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        "--skip",
+        action="store_true",
+        dest="skip_existing",
+        help="When importing, skip packages that are already installed (ignores exported versions). Fast for large manifests.",
+    )
     args = parser.parse_args()
     if os.environ.get("ECPI_VERBOSE", "").strip() in ("1", "yes", "true"):
         args.verbose_install = True
@@ -88,8 +114,21 @@ def main():
         show_installers()
         return
 
+    # Export doesn't need a query argument.
+    if args.export_path:
+        managers_for_export = detect_managers(include_shell_specific=False)
+        if not managers_for_export:
+            print("ecpi: No supported package manager found for export (pacman/paru/yay/yum/fisher).")
+            sys.exit(1)
+        ok = export_installed_packages(managers_for_export, args.export_path)
+        sys.exit(0 if ok else 1)
+
+    if args.import_path and args.export_path:
+        print("ecpi: Please use either --export or --import, not both.")
+        sys.exit(2)
+
     query = " ".join(args.query).strip()
-    if not query:
+    if not query and not args.import_path:
         parser.print_help()
         sys.exit(0)
 
@@ -97,6 +136,10 @@ def main():
     if not managers:
         print("ecpi: No supported package manager found (pacman, paru, yay, yum, fisher).")
         sys.exit(1)
+
+    if args.import_path:
+        run_import(managers, args.import_path, args)
+        return
 
     if args.uninstall:
         run_uninstall(managers, query, args)
@@ -139,6 +182,192 @@ def main():
             skip_confirm=args.yes,
         )
     sys.exit(0 if ok else 1)
+
+
+def run_import(managers: list[dict], manifest_path: str, args) -> None:
+    """Import a previously-exported manifest and install its packages."""
+    try:
+        entries = parse_export_manifest(manifest_path)
+    except OSError as e:
+        print(f"ecpi: Could not read import manifest '{manifest_path}': {e}")
+        sys.exit(1)
+    if not entries:
+        print(f"ecpi: No install entries found in manifest: {manifest_path}")
+        sys.exit(1)
+
+    # Choose an AUR helper for `aur` entries.
+    aur_mgr = next((m for m in managers if m["name"] == "paru"), None) or next(
+        (m for m in managers if m["name"] == "yay"), None
+    )
+
+    installed_names_pacman: set[str] = set()
+    installed_names_yum: set[str] = set()
+    installed_names_fisher: set[str] = set()
+
+    if args.skip_existing:
+        pacman_mgr = next((m for m in managers if m["name"] == "pacman"), None)
+        yum_mgr = next((m for m in managers if m["name"] == "yum"), None)
+        fisher_mgr = next((m for m in managers if m["name"] == "fisher"), None)
+
+        # Quick pacman inventory (official + foreign).
+        if pacman_mgr:
+            try:
+                out = subprocess.run(
+                    [pacman_mgr["bin"], "-Qq"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if out.returncode == 0 and out.stdout:
+                    installed_names_pacman = {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Quick yum inventory.
+        if yum_mgr:
+            try:
+                out = subprocess.run(
+                    [yum_mgr["bin"], "list", "installed"],
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
+                )
+                if out.returncode == 0 and out.stdout:
+                    for line in out.stdout.splitlines():
+                        s = line.strip()
+                        if not s:
+                            continue
+                        if s.lower().startswith("installed packages") or s.lower().startswith("loaded plugins"):
+                            continue
+                        parts = s.split()
+                        if len(parts) < 2:
+                            continue
+                        name_arch = parts[0]
+                        name = name_arch.split(".", 1)[0] if "." in name_arch else name_arch
+                        if name:
+                            installed_names_yum.add(name)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        # Quick fisher inventory.
+        if fisher_mgr:
+            try:
+                out = subprocess.run(
+                    [fisher_mgr["bin"], "list"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if out.returncode == 0 and out.stdout:
+                    installed_names_fisher = {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+    # Map manifest kind -> chosen installer.
+    missing_kinds: set[str] = set()
+    choices: list[dict] = []
+    seen_install_keys: set[tuple[str, str]] = set()
+    for e in entries:
+        kind = e["kind"]
+        name = e["name"]
+        version = e.get("version", "") or ""
+        if kind == "pacman":
+            m = next((x for x in managers if x["name"] == "pacman"), None)
+            if not m:
+                missing_kinds.add("pacman")
+                continue
+            if args.skip_existing and installed_names_pacman and name in installed_names_pacman:
+                continue
+            k = ("pacman", name)
+            if k in seen_install_keys:
+                continue
+            seen_install_keys.add(k)
+            choices.append(
+                {"manager": "pacman", "bin": m["bin"], "name": name, "version": version}
+            )
+        elif kind == "aur":
+            if not aur_mgr:
+                missing_kinds.add("aur")
+                continue
+            if args.skip_existing and installed_names_pacman and name in installed_names_pacman:
+                continue
+            k = (aur_mgr["name"], name)
+            if k in seen_install_keys:
+                continue
+            seen_install_keys.add(k)
+            choices.append(
+                {
+                    "manager": aur_mgr["name"],
+                    "bin": aur_mgr["bin"],
+                    "name": name,
+                    "version": version,
+                }
+            )
+        elif kind == "yum":
+            m = next((x for x in managers if x["name"] == "yum"), None)
+            if not m:
+                missing_kinds.add("yum")
+                continue
+            if args.skip_existing and installed_names_yum and name in installed_names_yum:
+                continue
+            k = ("yum", name)
+            if k in seen_install_keys:
+                continue
+            seen_install_keys.add(k)
+            choices.append({"manager": "yum", "bin": m["bin"], "name": name, "version": version})
+        elif kind == "fisher":
+            m = next((x for x in managers if x["name"] == "fisher"), None)
+            if not m:
+                missing_kinds.add("fisher")
+                continue
+            if args.skip_existing and installed_names_fisher and name in installed_names_fisher:
+                continue
+            k = ("fisher", name)
+            if k in seen_install_keys:
+                continue
+            seen_install_keys.add(k)
+            choices.append({"manager": "fisher", "bin": m["bin"], "name": name, "version": version})
+
+    if not choices:
+        print("ecpi: Nothing to install from this manifest with the currently available managers.")
+        if missing_kinds:
+            print(f"Missing managers for kinds: {', '.join(sorted(missing_kinds))}")
+        sys.exit(1)
+
+    print(f"Importing manifest: {manifest_path}")
+    print(f"Planned installs: {len(choices)}")
+
+    if not args.yes:
+        try:
+            ans = input("Proceed with installing packages from this manifest? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(0)
+        if ans and ans not in ("y", "yes"):
+            print("Cancelled.")
+            sys.exit(0)
+
+    ok_count = 0
+    fail_count = 0
+    for i, choice in enumerate(choices, start=1):
+        print(f"\n[{i}/{len(choices)}] Installing {choice['name']} ({choice['manager']})")
+        ok = install_package(
+            managers,
+            choice,
+            verbose_install=args.verbose_install,
+            pin_versions=args.pin_versions,
+        )
+        if ok:
+            ok_count += 1
+            offer_post_install_actions(
+                choice["manager"],
+                choice["name"],
+                skip_confirm=args.yes,
+            )
+        else:
+            fail_count += 1
+
+    print(f"\nImport complete. Success: {ok_count}, Failed: {fail_count}")
+    sys.exit(0 if fail_count == 0 else 1)
 
 
 def run_uninstall(managers: list, query: str, args) -> None:
