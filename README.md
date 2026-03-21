@@ -1,6 +1,6 @@
 # ecpi — Easy Cross-Package Installer
 
-A small Arch Linux helper that picks the right package manager for you, searches across **pacman**, **paru**, **yay**, **yum**, **fisher**, and **git clone**, suggests similar packages when there’s no exact match, and asks for confirmation before running any install.
+A small Arch Linux helper that picks the right package manager for you, searches across **pacman**, **paru**, **yay**, **yum**, **fisher**, and **git clone**, suggests similar packages when there’s no exact match. Manages whole system import and export among all installed pakcage managers.
 
 **Repository:** [https://github.com/ObertoIsOBS/ecpi](https://github.com/ObertoIsOBS/ecpi)
 
@@ -15,6 +15,8 @@ A small Arch Linux helper that picks the right package manager for you, searches
 - **Git fallback**: if the query looks like a repo (URL or `owner/repo`) and no package is found, offers to clone with `git clone`.
 - **Environment-aware installers**: shell-specific managers (e.g. **fisher** for Fish) are only offered when they match your `$SHELL`. Use `--show-installers` to see what’s available for the current environment.
 - **Post-install**: after installing via pacman/paru/yay, ecpi can add CLI binaries to your shell PATH (if not already there) and offer to add a desktop shortcut for GUI apps.
+- **Export Packages**: Creates a detailed export file of all packages installed in the enviornment.
+- **Import Packages**: Installs packages from exported package list sequentially.
 
 ## Requirements
 
